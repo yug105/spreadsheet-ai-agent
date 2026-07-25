@@ -39,14 +39,16 @@ right is far more expensive than a slow one, because the user has no way to noti
 
 ## How the agent works
 
-A hand-rolled multi-turn tool-calling loop in `sheetsai/quadratic_engine.py` — no agent
-framework. It calls an OpenAI-compatible endpoint (routed through OpenRouter), gets back
-tool calls, executes them, feeds results back, and repeats up to `max_turns` (default 8)
-until the model stops requesting tools.
+A hand-rolled multi-turn loop in `sheetsai/quadratic_engine.py` orchestrates the reasoning.
+The model call and tool binding go through **LangChain** (`ChatOpenAI` + `bind_tools`),
+routed to Claude via OpenRouter; the loop gets back tool calls, executes them, feeds results
+back, and repeats up to `max_turns` (default 8) until the model stops requesting tools.
 
-I wrote the loop directly because I wanted to control what went into the context window on
-each turn. The whole design depends on feeding the model a structured view of the workbook
-instead of raw cells, and that is exactly the part a framework abstracts away.
+I kept the orchestration loop itself custom — rather than a prebuilt agent executor — because
+the whole design depends on controlling exactly what goes into the context window each turn:
+a structured view of the workbook instead of raw cells. LangChain handles the model/tool
+plumbing; the turn-by-turn context assembly stays under my control. (If the LangChain deps
+are unavailable the engine falls back to the raw OpenRouter client.)
 
 Tools available to the model include reading and writing ranges, setting formulas, sorting,
 find-and-replace, cell and conditional formatting, creating sheets and tables, creating

@@ -11,6 +11,16 @@ from datetime import datetime
 import openai
 import os
 
+# LangChain powers the model call + tool binding. Guarded so the service still
+# runs (falling back to the raw OpenRouter client) if the extra deps are absent.
+try:
+    from langchain_openai import ChatOpenAI
+    from langchain_core.messages import convert_to_messages, convert_to_openai_messages
+
+    _LANGCHAIN_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    _LANGCHAIN_AVAILABLE = False
+
 from sheetsai.enhanced_sheets_api import EnhancedGoogleSheetsManager
 from sheetsai.context.context_builder import QuadraticContext as AdvancedContext
 from sheetsai.tools_fixed import get_atomic_tools, get_tools_schema
@@ -38,14 +48,26 @@ class ExactQuadraticEngine:
         if not self.api_key:
             raise SheetsAIError("OPENROUTER_API_KEY environment variable, api_key parameter, or AWS Secrets Manager is required")
         
-        # Use OpenRouter for API access
+        # OpenRouter routing headers, shared by both call paths.
+        openrouter_base_url = "https://openrouter.ai/api/v1"
+        openrouter_headers = {"HTTP-Referer": "https://sheetsai.com", "X-Title": "SheetsAI"}
+
+        # Primary path: LangChain chat model with tool binding.
+        self.llm = None
+        if _LANGCHAIN_AVAILABLE:
+            self.llm = ChatOpenAI(
+                model=self.model_name,
+                api_key=self.api_key,
+                base_url=openrouter_base_url,
+                default_headers=openrouter_headers,
+                max_tokens=4000,
+            )
+
+        # Fallback path: raw OpenRouter (OpenAI-compatible) client.
         self.client = openai.OpenAI(
-            base_url="https://openrouter.ai/api/v1",
+            base_url=openrouter_base_url,
             api_key=self.api_key,
-            default_headers={
-                "HTTP-Referer": "https://sheetsai.com", 
-                "X-Title": "SheetsAI"
-            }
+            default_headers=openrouter_headers,
         )
         
         # Load tools
@@ -222,44 +244,60 @@ Be precise, professional, and thorough. Minimize the number of turns by grouping
         return messages
     
     def _make_ai_call(self, messages: List[Dict[str, Any]], turn: int) -> Dict[str, Any]:
-        """Make API call to the AI model via OpenRouter"""
-        
-        try:
-            # Prepare tools for API
-            tools = []
-            for schema in self._get_tool_schemas():
-                tools.append({
-                    "type": "function",
-                    "function": {
-                        "name": schema["name"],
-                        "description": schema["description"],
-                        "parameters": schema["parameters"]
-                    }
-                })
-            
-            # Make the call via OpenRouter
-            response = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=messages,
-                tools=tools,
-                tool_choice="auto",
-                max_tokens=4000
-            )
-            
-            return {
-                'content': response.choices[0].message.content,
-                'tool_calls': response.choices[0].message.tool_calls,
-                'turn': turn + 1
+        """Make the model call, preferring LangChain and falling back to the raw client."""
+
+        # Prepare tools in OpenAI function-calling format (accepted by both paths).
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": schema["name"],
+                    "description": schema["description"],
+                    "parameters": schema["parameters"],
+                },
             }
-            
+            for schema in self._get_tool_schemas()
+        ]
+
+        try:
+            if self.llm is not None:
+                content, tool_calls = self._call_via_langchain(messages, tools)
+            else:
+                content, tool_calls = self._call_via_client(messages, tools)
+
+            return {'content': content, 'tool_calls': tool_calls, 'turn': turn + 1}
+
         except Exception as e:
             logger.error(f"❌ AI call failed: {e}")
             return {
                 'content': f"Error making AI call: {str(e)}",
                 'tool_calls': [],
                 'turn': turn + 1,
-                'error': str(e)
+                'error': str(e),
             }
+
+    def _call_via_langchain(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]):
+        """Invoke the model through LangChain, binding the tool schemas.
+
+        Messages flow in and out as OpenAI-style dicts (LangChain's own
+        converters handle both directions) so the rest of the loop is unchanged.
+        """
+        llm_with_tools = self.llm.bind_tools(tools)
+        ai_message = llm_with_tools.invoke(convert_to_messages(messages))
+        openai_message = convert_to_openai_messages([ai_message])[0]
+        return openai_message.get('content') or '', openai_message.get('tool_calls') or []
+
+    def _call_via_client(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]):
+        """Fallback: call the raw OpenRouter (OpenAI-compatible) client directly."""
+        response = self.client.chat.completions.create(
+            model=self.model_name,
+            messages=messages,
+            tools=tools,
+            tool_choice="auto",
+            max_tokens=4000,
+        )
+        message = response.choices[0].message
+        return message.content, message.tool_calls
     
     def _process_turn_response(self, response: Dict[str, Any], turn: int) -> Dict[str, Any]:
         """Process a single turn response"""
