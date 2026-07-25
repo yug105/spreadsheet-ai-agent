@@ -1,0 +1,19 @@
+# Enhanced Sheets AI Backend Environment Variables
+# Copy this file to .env and fill in your actual values
+
+# REQUIRED: OpenRouter API Key for AI functionality
+# Get this from https://openrouter.ai/
+OPENROUTER_API_KEY=your_openrouter_api_key_here
+
+# OPTIONAL: Default spreadsheet ID (can be overridden in requests)
+DEFAULT_SPREADSHEET_ID=your_spreadsheet_id_here
+
+# OPTIONAL: Service account file path (defaults to test_sheetsai.json)
+SERVICE_ACCOUNT_FILE=test_sheetsai.json
+
+# OPTIONAL: Logging level
+LOG_LEVEL=INFO
+
+# OPTIONAL: Model configuration
+MODEL_NAME=anthropic/claude-3.5-sonnet
+MAX_TURNS=8 
